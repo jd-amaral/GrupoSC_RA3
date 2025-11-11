@@ -1,57 +1,64 @@
-#include "monitor.h"
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <unistd.h>
+#include <string.h>
+#include <errno.h>
+#include "monitor.h"
 
-static long clk_tck = 0;
+static unsigned long long last_total_jiffies = 0;
+static unsigned long long last_process_jiffies = 0;
 
 int monitor_cpu_usage(pid_t pid, double *cpu_percent) {
-    if (clk_tck == 0)
-        clk_tck = sysconf(_SC_CLK_TCK);
-
-    char path[64], line[512];
+    char path[64];
     snprintf(path, sizeof(path), "/proc/%d/stat", pid);
-    FILE *fp = fopen(path, "r");
-    if (!fp) return -1;
 
-    if (!fgets(line, sizeof(line), fp)) {
-        fclose(fp);
+    FILE *fp = fopen(path, "r");
+    if (!fp) {
+        if (errno == ENOENT)
+            fprintf(stderr, "⚠️  Processo %d não encontrado (terminou?)\n", pid);
+        else if (errno == EACCES)
+            fprintf(stderr, "🔒 Sem permissão para ler /proc/%d/stat\n", pid);
+        *cpu_percent = 0.0;
         return -1;
     }
+
+    char buffer[256];
+    unsigned long utime, stime;
+    unsigned long long starttime;
+    unsigned long long total_jiffies = 0;
+
+    // Lê valores principais do processo
+    for (int i = 0; i < 13; i++) fscanf(fp, "%s", buffer);
+    fscanf(fp, "%lu %lu", &utime, &stime);
     fclose(fp);
 
-    char comm[256], state;
-    unsigned long utime, stime;
-    sscanf(line, "%*d (%[^)]) %c %*s %*s %*s %*s %*s %*s %*s %*s %*s %lu %lu",
-           comm, &state, &utime, &stime);
+    unsigned long long process_jiffies = utime + stime;
 
-    static unsigned long long last_total_jiffies = 0, last_proc_jiffies = 0;
-    unsigned long long total_jiffies = 0;
-    FILE *fs = fopen("/proc/stat", "r");
-    if (fs) {
-        unsigned long long val; char tag[8];
-        fscanf(fs, "%s", tag);
-        while (fscanf(fs, "%llu", &val) == 1)
-            total_jiffies += val;
-        fclose(fs);
-    }
-
-    unsigned long long proc_jiffies = utime + stime;
-
-    if (last_total_jiffies == 0) {
-        last_total_jiffies = total_jiffies;
-        last_proc_jiffies = proc_jiffies;
+    // Lê tempo total do sistema
+    fp = fopen("/proc/stat", "r");
+    if (!fp) {
+        perror("Erro ao ler /proc/stat");
         *cpu_percent = 0.0;
-        return 0;
+        return -1;
     }
 
-    unsigned long long delta_total = total_jiffies - last_total_jiffies;
-    unsigned long long delta_proc = proc_jiffies - last_proc_jiffies;
+    char cpu_label[8];
+    unsigned long long user, nice, system, idle, iowait, irq, softirq, steal;
+    fscanf(fp, "%s %llu %llu %llu %llu %llu %llu %llu %llu",
+           cpu_label, &user, &nice, &system, &idle, &iowait, &irq, &softirq, &steal);
+    fclose(fp);
 
-    *cpu_percent = delta_total > 0 ? (100.0 * delta_proc / delta_total) : 0.0;
+    total_jiffies = user + nice + system + idle + iowait + irq + softirq + steal;
+
+    if (last_total_jiffies != 0 && last_process_jiffies != 0) {
+        unsigned long long total_diff = total_jiffies - last_total_jiffies;
+        unsigned long long proc_diff = process_jiffies - last_process_jiffies;
+        *cpu_percent = 100.0 * ((double)proc_diff / (double)total_diff);
+    } else {
+        *cpu_percent = 0.0;
+    }
 
     last_total_jiffies = total_jiffies;
-    last_proc_jiffies = proc_jiffies;
+    last_process_jiffies = process_jiffies;
     return 0;
 }
