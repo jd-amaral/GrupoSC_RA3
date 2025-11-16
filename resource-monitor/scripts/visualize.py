@@ -25,6 +25,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import logging
+import json
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 sns.set(style="whitegrid")
@@ -279,6 +280,162 @@ def summarize_and_plot(experiment_dir: Path, out_dir: Path, save_formats=('png',
         return
 
     raise FileNotFoundError(f"No recognized summary CSV in {experiment_dir}")
+
+def start_flask_server(root_dir: Path, host: str = '127.0.0.1', port: int = 5000):
+    try:
+        from flask import Flask, jsonify, send_from_directory, render_template_string, request
+    except Exception:
+        logging.error('Flask is not installed. Install in the project venv: pip install flask')
+        return
+
+    app = Flask('rm_visualizer')
+
+    # Map canonical experiment names to the exact plot directories requested by the user.
+    # root_dir is typically 'out/experiments'. Build the expected absolute paths.
+    exp_map = {}
+    # Prefer the repo's resource-monitor/out/experiments location — resolve relative to this script
+    repo_rm_dir = Path(__file__).resolve().parents[1]
+    plots_base = repo_rm_dir / 'out' / 'experiments'
+    exp_map = {
+        'exp1': plots_base / 'plots',
+        'exp2': plots_base / 'experiment2' / 'plots',
+        'exp3': plots_base / 'experiment3' / 'plots',
+        'exp4': plots_base / 'experiment4' / 'plots',
+        'exp5': plots_base / 'experiment5' / 'plots',
+    }
+
+    @app.route('/')
+    def index():
+        html = '''
+        <!doctype html>
+        <html>
+        <head>
+          <meta charset="utf-8">
+          <title>Resource Monitor Dashboard</title>
+          <style>body{font-family:Arial,Helvetica,sans-serif;margin:20px} img{max-width:800px;border:1px solid #ddd;padding:4px;margin:6px}</style>
+        </head>
+        <body>
+          <h2>Resource Monitor Dashboard</h2>
+          <div id="content">Loading...</div>
+          <script>
+            async function listExps(){
+              const res = await fetch('/api/experiments');
+              const exps = await res.json();
+              let html = '<ul>';
+              for(const e of exps) html += `<li><a href="#" onclick="showExp('`+e+`')">${e}</a></li>`;
+              html += '</ul>';
+              // no remote start — UI only shows existing plots
+              html += `<p>Available plots are shown per experiment. To run experiments use the Makefile locally.</p>`;
+              document.getElementById('content').innerHTML = html;
+            }
+            async function showExp(name){
+              const r = await fetch(`/api/exp/${name}/summary`);
+              if(!r.ok){ document.getElementById('content').innerHTML = 'Failed to load'; return; }
+              const data = await r.json();
+              let html = `<h3>${name}</h3>`;
+              html += '<div id="plots"></div>';
+              document.getElementById('content').innerHTML = html;
+              const pr = await fetch(`/api/exp/${name}/plots`);
+              const plots = await pr.json();
+              let phtml = '';
+              for(const f of plots){ phtml += `<div><img src="/plots/${name}/${f}" alt="${f}"/><div>${f}</div></div>`; }
+              document.getElementById('plots').innerHTML = phtml;
+            }
+                        // start() removed — server does not run experiments
+            listExps();
+          </script>
+        </body>
+        </html>
+        '''
+        return render_template_string(html)
+
+    @app.route('/api/experiments')
+    def list_experiments():
+        # Return the canonical list in fixed order so UI shows experiments 1..5
+        return jsonify([k for k in ['exp1', 'exp2', 'exp3', 'exp4', 'exp5']])
+
+    @app.route('/api/exp/<name>/plots')
+    def list_plots(name):
+        pdir = exp_map.get(name)
+        files = []
+        if pdir and pdir.exists():
+            for f in sorted(pdir.iterdir()):
+                if f.is_file() and f.suffix.lower() in ('.png', '.svg'):
+                    files.append(f.name)
+        return jsonify(files)
+
+    @app.route('/plots/<exp>/<path:fname>')
+    def serve_plot(exp, fname):
+        pdir = exp_map.get(exp)
+        if not pdir or not pdir.exists():
+            return jsonify({'error': 'not found'}), 404
+        return send_from_directory(str(pdir.resolve()), fname)
+
+    @app.route('/api/exp/<name>/summary')
+    def exp_summary(name):
+        """Return available aggregate CSV data (if present) and list of files for the experiment.
+        This endpoint does NOT run or regenerate experiments; it only reports already-generated artifacts.
+        """
+        # use mapped plots dir if present
+        plots_dir = exp_map.get(name)
+        if plots_dir is None:
+            expdir = root_dir / name
+            if not expdir.exists():
+                return jsonify({'error': 'not found'}), 404
+            plots_dir = expdir / 'plots'
+
+        # look for known aggregate CSV files and return if found
+        for fn in ('aggregated_summary.csv', 'exp4_agg.csv', 'exp5_agg.csv', 'exp2_time_agg.csv'):
+            p = plots_dir / fn
+            if p.exists():
+                try:
+                    df = pd.read_csv(p)
+                    return jsonify({'aggregate': fn, 'data': df.to_dict(orient='records')})
+                except Exception as e:
+                    logging.warning(f"Failed to read aggregate {p}: {e}")
+
+        # No aggregate CSV found — return list of files and plots
+        files = []
+        # try listing files from parent experiment dir if available
+        parent_dir = plots_dir.parent if plots_dir else None
+        if parent_dir and parent_dir.exists():
+            for x in parent_dir.iterdir():
+                if x.is_file():
+                    files.append(x.name)
+
+        plots = []
+        if plots_dir and plots_dir.exists():
+            for f in sorted(plots_dir.iterdir()):
+                if f.is_file() and f.suffix.lower() in ('.png', '.svg'):
+                    plots.append(f.name)
+        return jsonify({'files': files, 'plots': plots})
+
+    @app.route('/api/exp/<name>/anomalies')
+    def exp_anomalies(name):
+        expdir = root_dir / name
+        results = []
+        for p in expdir.rglob('*.anomalies.jsonl'):
+            try:
+                with p.open('r', encoding='utf-8') as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line or line.startswith('#'): continue
+                        try:
+                            results.append(json.loads(line))
+                        except Exception:
+                            try:
+                                results.append(eval(line))
+                            except Exception:
+                                continue
+            except Exception:
+                continue
+        return jsonify(results)
+
+    # The server intentionally does NOT provide endpoints to start experiments.
+    # It only serves already-generated plots and CSVs under the experiments directory.
+
+    logging.info(f"Starting Flask server on {host}:{port}, serving {root_dir}")
+    app.run(host=host, port=port, debug=False)
 
 
 def summarize_and_plot_exp2(experiment_dir: Path, out_dir: Path, save_formats=('png',)):
@@ -572,6 +729,9 @@ if __name__ == '__main__':
     parser.add_argument('--out', '-o', type=str, default=None, help='Output directory for plots (defaults to <dir>/plots)')
     parser.add_argument('--formats', type=str, default='png', help='Comma-separated image formats (png,svg)')
     parser.add_argument('--show', action='store_true', help='Show plots interactively (requires GUI)')
+    parser.add_argument('--serve', action='store_true', help='Start a Flask server to browse experiments')
+    parser.add_argument('--host', type=str, default='127.0.0.1', help='Host for Flask server')
+    parser.add_argument('--port', type=int, default=5000, help='Port for Flask server')
 
     args = parser.parse_args()
     exp_dir = Path(args.dir)
@@ -582,7 +742,12 @@ if __name__ == '__main__':
     formats = tuple([s.strip() for s in args.formats.split(',') if s.strip()])
 
     ensure_out_dir(out_dir)
-    summarize_and_plot(exp_dir, out_dir, save_formats=formats)
+    if args.serve:
+        # run server which will call summarize_on_demand
+        start_flask_server(exp_dir, host=args.host, port=args.port)
+        sys.exit(0)
+    else:
+        summarize_and_plot(exp_dir, out_dir, save_formats=formats)
 
     if args.show:
         # open the saved images if possible
