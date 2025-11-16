@@ -33,18 +33,23 @@ int export_metrics_csv(const char *filename, const proc_metrics_t *data, size_t 
     fprintf(f,
         "Timestamp,PID,CPU%%,Threads,VolCtx,InvCtx,"
         "RSS(kB),VSZ(kB),MinFlt,MajFlt,Swap(kB),"
-        "RChar,WChar,ReadBytes,WriteBytes,Syscalls\n");
+        "RChar,WChar,ReadBytes,WriteBytes,Syscalls,"
+        "RChar/s,WChar/s,ReadBytes/s,WriteBytes/s,Syscalls/s\n");
 
     for (size_t i = 0; i < count; i++) {
         fprintf(f,
             "%.0f,%d,%.2f,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,"
-            "%llu,%llu,%llu,%llu,%llu\n",
+            "%llu,%llu,%llu,%llu,%llu,"
+            "%.2f,%.2f,%.2f,%.2f,%.2f\n",
             data[i].timestamp, data[i].pid, data[i].cpu_percent,
             data[i].threads, data[i].voluntary_ctxt, data[i].involuntary_ctxt,
             data[i].rss_kb, data[i].vmsize_kb, data[i].minflt,
             data[i].majflt, data[i].swap_kb,
             data[i].rchar, data[i].wchar,
-            data[i].read_bytes, data[i].write_bytes, data[i].syscalls);
+            data[i].read_bytes, data[i].write_bytes, data[i].syscalls,
+            data[i].rchar_per_s, data[i].wchar_per_s,
+            data[i].read_bytes_per_s, data[i].write_bytes_per_s,
+            data[i].syscalls_per_s);
     }
 
     fclose(f);
@@ -79,6 +84,13 @@ int export_metrics_json(const char *filename, const proc_metrics_t *data, size_t
         json_object_object_add(jobj, "read_bytes", json_object_new_int64(data[i].read_bytes));
         json_object_object_add(jobj, "write_bytes", json_object_new_int64(data[i].write_bytes));
         json_object_object_add(jobj, "syscalls", json_object_new_int64(data[i].syscalls));
+
+        /* taxas por segundo (derivadas entre amostras) */
+        json_object_object_add(jobj, "rchar_per_s", json_object_new_double(data[i].rchar_per_s));
+        json_object_object_add(jobj, "wchar_per_s", json_object_new_double(data[i].wchar_per_s));
+        json_object_object_add(jobj, "read_bytes_per_s", json_object_new_double(data[i].read_bytes_per_s));
+        json_object_object_add(jobj, "write_bytes_per_s", json_object_new_double(data[i].write_bytes_per_s));
+        json_object_object_add(jobj, "syscalls_per_s", json_object_new_double(data[i].syscalls_per_s));
 
         json_object_array_add(jarray, jobj);
     }
@@ -260,15 +272,37 @@ int main(int argc, char *argv[]) {
         m->pid = pid;
         m->timestamp = time(NULL);
 
+        /* inicializa taxas para o caso de primeira amostra */
+        m->rchar_per_s = 0.0;
+        m->wchar_per_s = 0.0;
+        m->read_bytes_per_s = 0.0;
+        m->write_bytes_per_s = 0.0;
+        m->syscalls_per_s = 0.0;
+
         /* COLETA COMPLETA */
         monitor_cpu_usage(pid, &m->cpu_percent);
         monitor_memory_usage(pid, &m->rss_kb, &m->vmsize_kb, &m->minflt, &m->majflt, &m->swap_kb);
         monitor_io_usage(pid, &m->rchar, &m->wchar, &m->read_bytes, &m->write_bytes, &m->syscalls);
 
+         /* calcula taxas por segundo a partir da amostra anterior, se existir */
+         if (count > 0) {
+             proc_metrics_t *prev = &data[count - 1];
+             double dt = m->timestamp - prev->timestamp;
+             if (dt <= 0.0) dt = 1.0; /* fallback seguro */
+
+             m->rchar_per_s = (double)(m->rchar - prev->rchar) / dt;
+             m->wchar_per_s = (double)(m->wchar - prev->wchar) / dt;
+             m->read_bytes_per_s = (double)(m->read_bytes - prev->read_bytes) / dt;
+             m->write_bytes_per_s = (double)(m->write_bytes - prev->write_bytes) / dt;
+             m->syscalls_per_s = (double)(m->syscalls - prev->syscalls) / dt;
+         }
+
          printf("[%.0f] CPU: %.2f%% | RSS: %lu KB | VSZ: %lu KB "
-             "| RChar/WChar: %llu/%llu | Read/Write: %llu/%llu | Syscalls: %llu\n",
+             "| RChar/WChar: %llu/%llu | Read/Write: %llu/%llu | Syscalls: %llu "
+             "| RChar/s: %.2f | WChar/s: %.2f | Read/s: %.2f | Write/s: %.2f | Sys/s: %.2f\n",
              m->timestamp, m->cpu_percent, m->rss_kb, m->vmsize_kb,
-             m->rchar, m->wchar, m->read_bytes, m->write_bytes, m->syscalls);
+             m->rchar, m->wchar, m->read_bytes, m->write_bytes, m->syscalls,
+             m->rchar_per_s, m->wchar_per_s, m->read_bytes_per_s, m->write_bytes_per_s, m->syscalls_per_s);
 
         count++;
         sleep(interval);

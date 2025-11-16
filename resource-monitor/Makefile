@@ -1,6 +1,6 @@
 # Compilador e flags
 CC = gcc
-CFLAGS = -Wall -Wextra -O2
+CFLAGS = -Wall -Wextra -O2 -Werror
 INCLUDE = -Iinclude
 
 # Fontes, objetos e binário final

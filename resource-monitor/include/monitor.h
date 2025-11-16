@@ -27,6 +27,12 @@ typedef struct {
     unsigned long long read_bytes;     // bytes lidos do disco
     unsigned long long write_bytes;    // bytes escritos no disco
     unsigned long long syscalls;       // número de syscalls de I/O
+    /* Taxas por segundo (derivadas entre amostras) */
+    double read_bytes_per_s;
+    double write_bytes_per_s;
+    double rchar_per_s;
+    double wchar_per_s;
+    double syscalls_per_s;
 } proc_metrics_t;
 
 

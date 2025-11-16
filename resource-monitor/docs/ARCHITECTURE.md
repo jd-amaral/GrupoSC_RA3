@@ -67,3 +67,24 @@ Implementada em `src/main.c`, é responsável por:
 * Suporte a cgroups e múltiplos PIDs.
 * Exportação contínua para banco de dados.
 * Modo daemon com limites configuráveis.
+
+## Arquitetura do Container / Integração com namespaces e cgroups
+
+O projeto foi pensado para funcionar bem tanto em hosts nativos quanto em containers. Os pontos principais de integração:
+
+- Namespaces: o `namespace_analyzer` lê links em `/proc/<pid>/ns/*` e, portanto, identifica namespaces de processos dentro do mesmo kernel (mesmo container ou host). Em containers, os namespaces podem ser isolados; o analisador só verá os PIDs visíveis dentro do mount de `/proc` do ambiente onde o binário é executado.
+
+- Cgroups v2: o `cgroup_manager` assume que o sistema usa cgroup v2 e que o filesystem de cgroup está montado em `/sys/fs/cgroup`. O gerenciador cria um subdiretório `resource_monitor/<grupo>` sob esse caminho e escreve em arquivos de controle (`cgroup.procs`, `cpu.max`, `memory.max`, etc.).
+
+- Permissões: operações de escrita em `/sys/fs/cgroup` geralmente exigem privilégios (root). As leituras podem funcionar sem root dependendo das políticas do sistema. O código trata erros de permissão e emite mensagens claras ao usuário.
+
+### Recomendações de implantação em container
+
+- Se executar dentro de um container e precisar controlar cgroups do host, o container precisa executar com privilégios (`--privileged`) ou com montagens específicas de `/sys/fs/cgroup` habilitadas. Caso contrário, as operações de criação/limit/remap falharão por permissão.
+- Para análise de namespaces global (mostrar PIDs de todo o host), execute o binário no host ou em um container com `/proc` do host montado (por exemplo `-v /proc:/host_proc:ro`) e ajuste caminhos no código para usar `/host_proc`.
+
+### Segurança e isolamento
+
+- O analisador de namespaces e o gerenciador de cgroup não elevam privilégios por si só — operações que requerem root falham com mensagens informativas. Testes que modificam cgroups são implementados como stubs ou marcados para execução manual com `sudo`.
+
+Essas considerações ajudam a entender como a ferramenta se comporta em ambientes containerizados e quais ajustes são necessários para integração com infraestruturas que usam namespaces e cgroups intensivamente.

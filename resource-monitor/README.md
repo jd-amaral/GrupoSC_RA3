@@ -62,6 +62,42 @@ sudo apt install libjson-c-dev
 * No WSL, alguns campos de `/proc/[pid]/status` podem não estar disponíveis; o programa usa fallback automático.
 * CSV e JSON são salvos com timestamp, PID, CPU%, RSS/VSZ e bytes de I/O.
 
+### Exemplos de uso com cgroups (cgroup v2)
+
+Para usar as funções de cgroup você precisará de permissões (geralmente `sudo`) e de um kernel com cgroup v2 habilitado.
+
+1) Criar um cgroup chamado `mygroup`:
+
+```bash
+sudo ./resource_monitor --cg-create mygroup
+```
+
+2) Adicionar um PID (por exemplo 1234) ao cgroup:
+
+```bash
+sudo ./resource_monitor --cg-add-pid mygroup 1234
+```
+
+3) Definir limite de memória (ex: 512 MB):
+
+```bash
+sudo ./resource_monitor --cg-set-mem mygroup 512
+```
+
+4) Definir limite de CPU (ex: 50% de um core):
+
+```bash
+sudo ./resource_monitor --cg-set-cpu mygroup 50
+```
+
+5) Gerar relatório do cgroup:
+
+```bash
+./resource_monitor --cg-report mygroup
+```
+
+Observação: criar/mover processos no cgroup pode exigir que o sistema tenha habilitados os controllers (`+cpu +memory +io`). Se houver falha por permissão, execute com `sudo`.
+
 ---
 
 Namespace commands
