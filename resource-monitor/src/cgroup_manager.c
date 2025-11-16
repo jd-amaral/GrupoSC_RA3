@@ -15,6 +15,7 @@
 // Buffer global para construir caminhos
 static char g_cgroup_base_path[256];
 static int g_base_path_initialized = 0;
+static int g_is_cgroup_v2 = -1; /* -1 = unknown, 0 = v1, 1 = v2 */
 
 // --- Funções Auxiliares ---
 
@@ -27,6 +28,12 @@ static const char* get_monitor_base_path() {
         snprintf(g_cgroup_base_path, sizeof(g_cgroup_base_path), "%s/%s",
                  CGROUP_V2_BASE, MONITOR_BASE_DIR);
         g_base_path_initialized = 1;
+        /* Detect cgroup v2 by presence of cgroup.controllers file */
+        if (access("/sys/fs/cgroup/cgroup.controllers", F_OK) == 0) {
+            g_is_cgroup_v2 = 1;
+        } else {
+            g_is_cgroup_v2 = 0;
+        }
     }
     return g_cgroup_base_path;
 }
@@ -123,7 +130,7 @@ static int parse_stat_file(const char* path, const char* keys[], unsigned long l
 // --- Implementação das Funções Públicas (cgroup.h) ---
 
 const char* cgroup_get_base_path(void) {
-    return CGROUP_V2_BASE;
+    return get_monitor_base_path();
 }
 
 int cgroup_ensure_base_path(const char* base_name) {
@@ -161,12 +168,19 @@ int cgroup_create(const char* relative_path) {
         return -1;
     }
     
-    // Para um cgroup ser válido, precisamos habilitar os controllers
-    // Escrevemos "+cpu +memory +io" no 'cgroup.subtree_control' do PAI
-    // para que fiquem disponíveis no FILHO.
-    if (write_cgroup_file(get_monitor_base_path(), "cgroup.subtree_control", "+cpu +memory +io") != 0) {
-        fprintf(stderr, "Aviso: Falha ao habilitar controllers (cpu, memory, io). Limites podem não funcionar.\n");
-        // Não retorna -1, pois o diretório foi criado
+    /* Para cgroup v2 podemos tentar habilitar controllers no pai usando
+       cgroup.subtree_control. Em cgroup v1 isso não se aplica. */
+    if (g_is_cgroup_v2 == -1) {
+        /* ensure detection */
+        get_monitor_base_path();
+    }
+    if (g_is_cgroup_v2 == 1) {
+        if (write_cgroup_file(get_monitor_base_path(), "cgroup.subtree_control", "+cpu +memory +io") != 0) {
+            fprintf(stderr, "Aviso: Falha ao habilitar controllers (cpu, memory, io). Limites podem não funcionar.\n");
+        }
+    } else {
+        /* cgroup v1: controllers are managed differently; emit a helpful note */
+        fprintf(stderr, "Nota: host aparenta usar cgroup v1; alguns limites podem requerer configuração diferente.\n");
     }
 
     printf("Cgroup '%s' criado.\n", relative_path);

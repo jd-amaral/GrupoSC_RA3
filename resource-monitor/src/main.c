@@ -9,6 +9,11 @@
 #include <string.h>
 #include <json-c/json.h>
 #include <errno.h>
+#include <math.h>
+
+#ifdef USE_NCURSES
+#include <ncurses.h>
+#endif
 
 int check_process_exists(pid_t pid) {
     if (kill(pid, 0) == 0) {
@@ -142,6 +147,29 @@ void run_tests() {
 static volatile int running = 1;
 void handle_sigint(int sig __attribute__((unused))) { running = 0; }
 
+/* Simple running statistics (Welford) for online z-score */
+typedef struct {
+    unsigned long count;
+    double mean;
+    double m2;
+} running_stats_t;
+
+static void rs_init(running_stats_t *rs){ rs->count = 0; rs->mean = 0.0; rs->m2 = 0.0; }
+static void rs_update(running_stats_t *rs, double x){
+    rs->count++;
+    double delta = x - rs->mean;
+    rs->mean += delta / rs->count;
+    double delta2 = x - rs->mean;
+    rs->m2 += delta * delta2;
+}
+static double rs_variance(running_stats_t *rs){ return (rs->count > 1) ? (rs->m2 / (rs->count - 1)) : 0.0; }
+static double rs_stddev(running_stats_t *rs){ return sqrt(rs_variance(rs)); }
+static double rs_zscore(running_stats_t *rs, double x){
+    double sd = rs_stddev(rs);
+    if (sd <= 0.0) return 0.0;
+    return (x - rs->mean) / sd;
+}
+
 int main(int argc, char *argv[]) {
     
     if (argc == 2 && strcmp(argv[1], "--test") == 0) {
@@ -237,6 +265,19 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    /* New CLI flags: --ui (ncurses), --anomaly (enable online anomaly detection), --anomaly-threshold <float> */
+    int ui_mode = 0;
+    int anomaly_mode = 0;
+    double anomaly_threshold = 3.0;
+
+    for (int ai = 1; ai < argc; ai++) {
+        if (strcmp(argv[ai], "--ui") == 0) ui_mode = 1;
+        if (strcmp(argv[ai], "--anomaly") == 0) anomaly_mode = 1;
+        if (strcmp(argv[ai], "--anomaly-threshold") == 0 && ai + 1 < argc) {
+            anomaly_threshold = atof(argv[++ai]);
+        }
+    }
+
     if (argc < 3) { // [cite: 63]
         fprintf(stderr, "Uso (Monitor PID): %s <PID> <arquivo_saida.csv|.json> [intervalo]\n", argv[0]);
         fprintf(stderr, "Uso (Namespace):   %s --ns-list <PID> | --ns-find <tipo> <inode> | ...\n", argv[0]);
@@ -254,10 +295,50 @@ int main(int argc, char *argv[]) {
 
     signal(SIGINT, handle_sigint);
 
-    printf("Monitorando PID %d a cada %d s... (Ctrl+C para sair)\n", pid, interval);
+    /* initialize ncurses UI if requested */
+    if (ui_mode) {
+#ifdef USE_NCURSES
+        initscr();
+        cbreak();
+        noecho();
+        nodelay(stdscr, TRUE); /* non-blocking getch */
+        keypad(stdscr, TRUE);
+        curs_set(0);
+        start_color();
+        init_pair(1, COLOR_GREEN, COLOR_BLACK);
+        init_pair(2, COLOR_YELLOW, COLOR_BLACK);
+        init_pair(3, COLOR_RED, COLOR_BLACK);
+        clear();
+#else
+        fprintf(stderr, "Aviso: compilado sem ncurses; UI desabilitado.\n");
+        ui_mode = 0;
+#endif
+    }
+
+    if (!ui_mode)
+        printf("Monitorando PID %d a cada %d s... (Ctrl+C para sair)\n", pid, interval);
 
     proc_metrics_t *data = NULL;
     size_t count = 0;
+
+    /* prepare anomaly detection state and anomalies output file */
+    running_stats_t rs_cpu;
+    running_stats_t rs_writebps;
+    rs_init(&rs_cpu);
+    rs_init(&rs_writebps);
+    FILE *anfp = NULL;
+    if (anomaly_mode) {
+        char anpath[512];
+        snprintf(anpath, sizeof(anpath), "%s.anomalies.jsonl", outfile);
+        anfp = fopen(anpath, "w");
+        if (!anfp) {
+            fprintf(stderr, "Aviso: não foi possível abrir arquivo de anomalias %s: %s\n", anpath, strerror(errno));
+            anomaly_mode = 0; /* disable to avoid further errors */
+        } else {
+            fprintf(anfp, "# JSON Lines: timestamp,metric,value,zscore\n");
+            fflush(anfp);
+        }
+    }
 
     while (running && count < 1000) {
         data = realloc(data, (count + 1) * sizeof(proc_metrics_t));
@@ -297,18 +378,82 @@ int main(int argc, char *argv[]) {
              m->syscalls_per_s = (double)(m->syscalls - prev->syscalls) / dt;
          }
 
-         printf("[%.0f] CPU: %.2f%% | RSS: %lu KB | VSZ: %lu KB "
-             "| RChar/WChar: %llu/%llu | Read/Write: %llu/%llu | Syscalls: %llu "
-             "| RChar/s: %.2f | WChar/s: %.2f | Read/s: %.2f | Write/s: %.2f | Sys/s: %.2f\n",
-             m->timestamp, m->cpu_percent, m->rss_kb, m->vmsize_kb,
-             m->rchar, m->wchar, m->read_bytes, m->write_bytes, m->syscalls,
-             m->rchar_per_s, m->wchar_per_s, m->read_bytes_per_s, m->write_bytes_per_s, m->syscalls_per_s);
+        if (ui_mode) {
+#ifdef USE_NCURSES
+            clear();
+            attron(A_BOLD);
+            mvprintw(0, 0, "Resource Monitor - PID %d   Interval %d s", pid, interval);
+            attroff(A_BOLD);
+            mvprintw(2, 0, "Timestamp: %.0f", m->timestamp);
+            mvprintw(4, 0, "CPU: ");
+            if (m->cpu_percent < 50.0) attron(COLOR_PAIR(1));
+            else if (m->cpu_percent < 80.0) attron(COLOR_PAIR(2));
+            else attron(COLOR_PAIR(3));
+            mvprintw(4, 6, "%.2f%%", m->cpu_percent);
+            attroff(COLOR_PAIR(1)); attroff(COLOR_PAIR(2)); attroff(COLOR_PAIR(3));
+
+            mvprintw(5, 0, "RSS: %lu KB   VSZ: %lu KB", m->rss_kb, m->vmsize_kb);
+            mvprintw(7, 0, "Read/s: %.2f  Write/s: %.2f", m->read_bytes_per_s, m->write_bytes_per_s);
+            mvprintw(8, 0, "RChar/s: %.2f  WChar/s: %.2f  Sys/s: %.2f", m->rchar_per_s, m->wchar_per_s, m->syscalls_per_s);
+            mvprintw(10, 0, "RChar/WChar: %llu/%llu  Read/Write: %llu/%llu  Syscalls: %llu", m->rchar, m->wchar, m->read_bytes, m->write_bytes, m->syscalls);
+            mvprintw(12, 0, "Press 'q' to quit.");
+            refresh();
+
+            int ch = getch();
+            if (ch == 'q' || ch == 'Q') {
+                running = 0;
+            }
+#else
+            /* fall back if built without ncurses */
+            printf("[%.0f] CPU: %.2f%% | RSS: %lu KB | VSZ: %lu KB "
+                "| RChar/WChar: %llu/%llu | Read/Write: %llu/%llu | Syscalls: %llu "
+                "| RChar/s: %.2f | WChar/s: %.2f | Read/s: %.2f | Write/s: %.2f | Sys/s: %.2f\n",
+                m->timestamp, m->cpu_percent, m->rss_kb, m->vmsize_kb,
+                m->rchar, m->wchar, m->read_bytes, m->write_bytes, m->syscalls,
+                m->rchar_per_s, m->wchar_per_s, m->read_bytes_per_s, m->write_bytes_per_s, m->syscalls_per_s);
+#endif
+        } else {
+            printf("[%.0f] CPU: %.2f%% | RSS: %lu KB | VSZ: %lu KB "
+                "| RChar/WChar: %llu/%llu | Read/Write: %llu/%llu | Syscalls: %llu "
+                "| RChar/s: %.2f | WChar/s: %.2f | Read/s: %.2f | Write/s: %.2f | Sys/s: %.2f\n",
+                m->timestamp, m->cpu_percent, m->rss_kb, m->vmsize_kb,
+                m->rchar, m->wchar, m->read_bytes, m->write_bytes, m->syscalls,
+                m->rchar_per_s, m->wchar_per_s, m->read_bytes_per_s, m->write_bytes_per_s, m->syscalls_per_s);
+        }
+
+        /* Online anomaly detection (simple z-score on CPU% and write bytes/sec) */
+        if (anomaly_mode) {
+            double zcpu = 0.0, zw = 0.0;
+            if (rs_cpu.count >= 2) zcpu = rs_zscore(&rs_cpu, m->cpu_percent);
+            if (rs_writebps.count >= 2) zw = rs_zscore(&rs_writebps, m->write_bytes_per_s);
+
+            /* update stats after computing z so first stable values are not mis-detected */
+            rs_update(&rs_cpu, m->cpu_percent);
+            rs_update(&rs_writebps, m->write_bytes_per_s);
+
+            if (fabs(zcpu) >= anomaly_threshold) {
+                printf("!! Anomaly detected (CPU) ts=%.0f value=%.2f z=%.2f\n", m->timestamp, m->cpu_percent, zcpu);
+                if (anfp) fprintf(anfp, "{\"timestamp\": %.0f, \"metric\": \"cpu_percent\", \"value\": %.6f, \"z\": %.6f}\n", m->timestamp, m->cpu_percent, zcpu);
+            }
+            if (fabs(zw) >= anomaly_threshold) {
+                printf("!! Anomaly detected (write_bps) ts=%.0f value=%.2f z=%.2f\n", m->timestamp, m->write_bytes_per_s, zw);
+                if (anfp) fprintf(anfp, "{\"timestamp\": %.0f, \"metric\": \"write_bytes_per_s\", \"value\": %.6f, \"z\": %.6f}\n", m->timestamp, m->write_bytes_per_s, zw);
+            }
+            if (anfp) fflush(anfp);
+        }
 
         count++;
         sleep(interval);
     }
 
     printf("\nEncerrando e exportando para %s...\n", outfile);
+
+    /* if ncurses UI was active, restore terminal */
+    if (ui_mode) {
+#ifdef USE_NCURSES
+        endwin();
+#endif
+    }
 
     if (strstr(outfile, ".csv"))
         export_metrics_csv(outfile, data, count);
