@@ -40,9 +40,10 @@ int monitor_memory_usage(
     }
 
     while (fgets(line, sizeof(line), fp)) {
-        sscanf(line, "VmRSS: %lu", rss_kb);
-        sscanf(line, "VmSize: %lu", vmsize_kb);
-        sscanf(line, "VmSwap: %lu", swap_kb);
+        unsigned long tmp;
+        if (sscanf(line, "VmRSS: %lu", &tmp) == 1) *rss_kb = tmp;
+        if (sscanf(line, "VmSize: %lu", &tmp) == 1) *vmsize_kb = tmp;
+        if (sscanf(line, "VmSwap: %lu", &tmp) == 1) *swap_kb = tmp;
     }
     fclose(fp);
 
@@ -60,17 +61,23 @@ int monitor_memory_usage(
         char comm[64], state;
 
         // ler início
-        if (fscanf(fp, "%d %s %c", &dummy_pid, comm, &state) == 3) {
+        if (fscanf(fp, "%d %63s %c", &dummy_pid, comm, &state) == 3) {
 
             // pular campos até chegar em minflt
-            for (int i = 0; i < 6; i++)
-                fscanf(fp, "%s", line);
+            for (int i = 0; i < 6; i++) {
+                if (fscanf(fp, "%255s", line) != 1) { break; }
+            }
 
-            fscanf(fp, "%lu", minflt); // campo 10
+            if (fscanf(fp, "%lu", minflt) != 1) {
+                /* não foi possível ler minflt */
+            }
 
             // pular 1 campo até majflt
-            fscanf(fp, "%s", line);
-            fscanf(fp, "%lu", majflt); // campo 12
+            if (fscanf(fp, "%255s", line) == 1) {
+                if (fscanf(fp, "%lu", majflt) != 1) {
+                    /* não foi possível ler majflt */
+                }
+            }
         }
 
         fclose(fp);

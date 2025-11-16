@@ -4,7 +4,7 @@ CFLAGS = -Wall -Wextra -O2
 INCLUDE = -Iinclude
 
 # Fontes, objetos e binário final
-SRC = src/main.c src/cpu_monitor.c src/memory_monitor.c src/io_monitor.c src/namespace_analyzer.c 
+SRC = src/main.c src/cpu_monitor.c src/memory_monitor.c src/io_monitor.c src/namespace_analyzer.c src/cgroup_manager.c
 OBJ = $(SRC:.c=.o)
 TARGET = resource_monitor
 
@@ -37,6 +37,12 @@ test:
 
 	# Teste Namespace
 	gcc -Iinclude -o tests/test_namespace tests/test_namespace.c src/namespace_analyzer.c
+
+	# Teste Cgroup (requer sudo para criar/escrever)
+	# Nota: Este é um teste simples de compilação. Um teste real
+	# precisaria ser executado com 'sudo' e ter lógica no test_cgroup.c
+	gcc -Iinclude -o tests/test_cgroup tests/test_cgroup.c src/cgroup_manager.c
+	@echo "Testes de compilação de Cgroup OK."
 
 	@./tests/test_cpu
 	@./tests/test_memory

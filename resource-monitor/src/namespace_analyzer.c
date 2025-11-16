@@ -27,9 +27,8 @@
 #endif
 
 
-static const char *NAMESPACE_TYPES[MAX_NAMESPACE_TYPES] = {
-    "mnt", "uts", "ipc", "net", "pid", "cgroup", "user"
-};
+/* lista de tipos de namespace conhecida (não utilizada diretamente) */
+/* removed unused NAMESPACE_TYPES to avoid -Wunused-variable warning */
 
 /* Lê o link simbólico /proc/<pid>/ns/<type> e extrai o número do inode (entre colchetes).
  * buffer deve ter espaço suficiente; buffer_size é o tamanho disponível.
@@ -84,7 +83,15 @@ int list_namespaces(int pid, NamespaceList *list) {
         char linkpath[256];
         char target[256];
 
-        snprintf(linkpath, sizeof(linkpath), "%s/%s", path, entry->d_name);
+        /* Protege a construção do caminho contra truncamento detectado pelo compilador */
+        size_t need = strlen(path) + 1 + strlen(entry->d_name) + 1; /* path + '/' + name + '\0' */
+        if (need > sizeof(linkpath)) {
+            /* caminho muito longo; pula essa entrada */
+            continue;
+        }
+        strcpy(linkpath, path);
+        strcat(linkpath, "/");
+        strcat(linkpath, entry->d_name);
 
         ssize_t len = readlink(linkpath, target, sizeof(target)-1);
         if (len == -1) continue;
@@ -100,8 +107,14 @@ int list_namespaces(int pid, NamespaceList *list) {
 
         *end = '\0';
 
-        strncpy(list->entries[list->count].type, entry->d_name, sizeof(list->entries[0].type)-1);
-        strncpy(list->entries[list->count].inode, inode, sizeof(list->entries[0].inode)-1);
+        /* copiar de forma segura, garantindo terminação e evitando warnings de truncation */
+        size_t tn = strnlen(entry->d_name, sizeof(list->entries[0].type) - 1);
+        memcpy(list->entries[list->count].type, entry->d_name, tn);
+        list->entries[list->count].type[tn] = '\0';
+
+        size_t in = strnlen(inode, sizeof(list->entries[0].inode) - 1);
+        memcpy(list->entries[list->count].inode, inode, in);
+        list->entries[list->count].inode[in] = '\0';
 
         list->count++;
         if (list->count >= MAX_NAMESPACE_TYPES) break;

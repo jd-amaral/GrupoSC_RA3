@@ -7,6 +7,8 @@ O **resource-monitor** é uma ferramenta em C para monitorar métricas de uso de
 ### Compilação
 
 ```bash
+cd "/mnt/c/Users/vitto/Documents/GitHub/VittPC/Sistemas de Computação - RA3/GrupoSC_RA3/resource-monitor"
+make clean
 make
 ```
 

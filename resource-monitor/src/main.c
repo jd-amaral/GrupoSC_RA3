@@ -1,5 +1,6 @@
 #include "monitor.h"
 #include "namespace.h"
+#include "cgroup.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <signal.h>
@@ -136,55 +137,102 @@ int main(int argc, char *argv[]) {
         return 0;
     }
 
- /* ===== Namespace Analyzer ===== */
-if (argc >= 2) {
+    /* ===================== Cgroup Manager ====================== */
+    // <<< 2. ADICIONE TODO ESTE BLOCO NOVO
+    // Garante que o diretório base exista (ignora falha se não for sudo)
+    if (argc > 1 && strncmp(argv[1], "--cg-", 5) == 0) {
+        if (cgroup_ensure_base_path(NULL) != 0) {
+             fprintf(stderr, "Aviso: Falha ao garantir o caminho base do cgroup. Comandos 'cg' podem falhar.\n");
+             // Continua mesmo assim, pode ser só leitura
+        }
+    }
 
-    if ((argc == 3 && (strcmp(argv[1], "--ns-list") == 0 || strcmp(argv[1], "--list-ns") == 0))) {
-        int pid = atoi(argv[2]);
-        if (pid <= 0) {
-            fprintf(stderr, "PID inválido: %s\n", argv[2]);
-            return 1;
+    if (argc == 3 && strcmp(argv[1], "--cg-create") == 0) {
+        // Uso: ./resource_monitor --cg-create <nome_grupo>
+        return cgroup_create(argv[2]);
+    }
+
+    if (argc == 4 && strcmp(argv[1], "--cg-add-pid") == 0) {
+        // Uso: ./resource_monitor --cg-add-pid <nome_grupo> <PID>
+        return cgroup_add_process(argv[2], atoi(argv[3]));
+    }
+    
+    if (argc == 4 && strcmp(argv[1], "--cg-set-mem") == 0) {
+        // Uso: ./resource_monitor --cg-set-mem <nome_grupo> <limite_MB>
+        long limit_mb = atol(argv[3]);
+        long limit_bytes = limit_mb * 1024 * 1024;
+        return cgroup_set_memory_limit(argv[2], limit_bytes);
+    }
+
+    if (argc == 4 && strcmp(argv[1], "--cg-set-cpu") == 0) {
+        // Uso: ./resource_monitor --cg-set-cpu <nome_grupo> <percent>
+        // Ex: 50 -> 50% de 1 core (50000us / 100000us)
+        long percent = atol(argv[3]);
+        if (percent <= 0 || percent > 400) { // Limite de sanidade
+             fprintf(stderr, "Percentual de CPU deve ser > 0\n"); return 1;
+        }
+        long max_usec = 100000 * percent / 100; // 100000us = 0.1s
+        long period_usec = 100000;
+        return cgroup_set_cpu_limit(argv[2], max_usec, period_usec);
+    }
+
+    if (argc == 3 && strcmp(argv[1], "--cg-report") == 0) {
+        // Uso: ./resource_monitor --cg-report <nome_grupo>
+        return cgroup_generate_report(argv[2]);
+    }
+    /* ===================== Fim Cgroup Manager ================== */
+
+    /* ===== Namespace Analyzer ===== */
+    if (argc >= 2) {
+
+        if ((argc == 3 && (strcmp(argv[1], "--ns-list") == 0 || strcmp(argv[1], "--list-ns") == 0))) {
+            int pid = atoi(argv[2]);
+            if (pid <= 0) {
+                fprintf(stderr, "PID inválido: %s\n", argv[2]);
+                return 1;
+            }
+
+            NamespaceList list;
+            memset(&list, 0, sizeof(list));
+
+            if (list_namespaces(pid, &list) != 0) {
+                fprintf(stderr, "Falha ao ler namespaces do PID %d\n", pid);
+                return 1;
+            }
+
+            printf("Namespaces do PID %d:\n", pid);
+            for (int i = 0; i < list.count; i++) {
+                printf("  %s:[%s]\n", list.entries[i].type, list.entries[i].inode);
+            }
+            return 0;
         }
 
-        NamespaceList list;
-        memset(&list, 0, sizeof(list));
-
-        if (list_namespaces(pid, &list) != 0) {
-            fprintf(stderr, "Falha ao ler namespaces do PID %d\n", pid);
-            return 1;
+        if (argc == 4 && strcmp(argv[1], "--ns-find") == 0) {
+            const char *type = argv[2];
+            const char *inode = argv[3];
+            return find_processes_in_namespace(type, inode);
         }
 
-        printf("Namespaces do PID %d:\n", pid);
-        for (int i = 0; i < list.count; i++) {
-            printf("  %s:[%s]\n", list.entries[i].type, list.entries[i].inode);
+        if (argc == 4 && strcmp(argv[1], "--ns-compare") == 0) {
+            int pid1 = atoi(argv[2]);
+            int pid2 = atoi(argv[3]);
+            if (pid1 <= 0 || pid2 <= 0) { fprintf(stderr, "PIDs inválidos\n"); return 1; }
+            return compare_namespaces(pid1, pid2);
         }
-        return 0;
+
+        if (argc == 2 && strcmp(argv[1], "--ns-report") == 0) {
+            return generate_namespace_report();
+        }
     }
 
-    if (argc == 4 && strcmp(argv[1], "--ns-find") == 0) {
-        const char *type = argv[2];
-        const char *inode = argv[3];
-        return find_processes_in_namespace(type, inode);
-    }
-
-    if (argc == 4 && strcmp(argv[1], "--ns-compare") == 0) {
-        int pid1 = atoi(argv[2]);
-        int pid2 = atoi(argv[3]);
-        if (pid1 <= 0 || pid2 <= 0) { fprintf(stderr, "PIDs inválidos\n"); return 1; }
-        return compare_namespaces(pid1, pid2);
-    }
-
-    if (argc == 2 && strcmp(argv[1], "--ns-report") == 0) {
-        return generate_namespace_report();
-    }
-}
-
-
-    if (argc < 3) {
+    if (argc < 3) { // [cite: 63]
+        fprintf(stderr, "Uso (Monitor PID): %s <PID> <arquivo_saida.csv|.json> [intervalo]\n", argv[0]);
+        fprintf(stderr, "Uso (Namespace):   %s --ns-list <PID> | --ns-find <tipo> <inode> | ...\n", argv[0]);
+        fprintf(stderr, "Uso (Cgroup):      %s --cg-create <grupo> | --cg-add-pid <grupo> <PID> | ...\n", argv[0]);
         fprintf(stderr, "Uso: %s <PID> <arquivo_saida.csv|.json> [intervalo]\n", argv[0]);
         return 1;
     }
-
+    
     pid_t pid = atoi(argv[1]);
     const char *outfile = argv[2];
     int interval = (argc >= 4) ? atoi(argv[3]) : 1;
@@ -217,10 +265,10 @@ if (argc >= 2) {
         monitor_memory_usage(pid, &m->rss_kb, &m->vmsize_kb, &m->minflt, &m->majflt, &m->swap_kb);
         monitor_io_usage(pid, &m->rchar, &m->wchar, &m->read_bytes, &m->write_bytes, &m->syscalls);
 
-        printf("[%.0f] CPU: %.2f%% | RSS: %lu KB | VSZ: %lu KB "
-               "| R/W: %llu/%llu | Syscalls: %llu\n",
-               m->timestamp, m->cpu_percent, m->rss_kb, m->vmsize_kb,
-               m->read_bytes, m->write_bytes, m->syscalls);
+         printf("[%.0f] CPU: %.2f%% | RSS: %lu KB | VSZ: %lu KB "
+             "| RChar/WChar: %llu/%llu | Read/Write: %llu/%llu | Syscalls: %llu\n",
+             m->timestamp, m->cpu_percent, m->rss_kb, m->vmsize_kb,
+             m->rchar, m->wchar, m->read_bytes, m->write_bytes, m->syscalls);
 
         count++;
         sleep(interval);

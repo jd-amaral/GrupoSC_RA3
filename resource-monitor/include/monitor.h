@@ -45,7 +45,7 @@ int monitor_io_usage(pid_t pid,
                      unsigned long long *write_bytes,
                      unsigned long long *syscalls);
 
-int export_to_csv(const char *filename, const proc_metrics_t *data, size_t count);
-int export_to_json(const char *filename, const proc_metrics_t *data, size_t count);
+int export_metrics_csv(const char *filename, const proc_metrics_t *data, size_t count);
+int export_metrics_json(const char *filename, const proc_metrics_t *data, size_t count);
 
 #endif

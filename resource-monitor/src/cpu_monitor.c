@@ -31,15 +31,20 @@ int monitor_cpu_usage(pid_t pid, double *cpu_percent) {
     // -------------------------------------------------------------
     char buffer[512];
     unsigned long utime = 0, stime = 0;
-    unsigned long long starttime = 0;
     unsigned long long total_jiffies = 0;
 
     // Campos de /proc/[pid]/stat
     int dummy;
     char comm[64], state;
-    fscanf(fp, "%d %s %c", &dummy, comm, &state);
-    for (int i = 0; i < 11; i++) fscanf(fp, "%s", buffer); // pula até campo 14
-    fscanf(fp, "%lu %lu", &utime, &stime);
+    if (fscanf(fp, "%d %63s %c", &dummy, comm, &state) != 3) {
+        fclose(fp);
+        *cpu_percent = 0.0;
+        return -1;
+    }
+    for (int i = 0; i < 11; i++) {
+        if (fscanf(fp, "%511s", buffer) != 1) { fclose(fp); *cpu_percent = 0.0; return -1; }
+    }
+    if (fscanf(fp, "%lu %lu", &utime, &stime) != 2) { fclose(fp); *cpu_percent = 0.0; return -1; }
     fclose(fp);
 
     unsigned long long process_jiffies = utime + stime;
@@ -56,8 +61,13 @@ int monitor_cpu_usage(pid_t pid, double *cpu_percent) {
 
     char cpu_label[8];
     unsigned long long user, nice, system, idle, iowait, irq, softirq, steal;
-    fscanf(fp, "%s %llu %llu %llu %llu %llu %llu %llu %llu",
-           cpu_label, &user, &nice, &system, &idle, &iowait, &irq, &softirq, &steal);
+        if (fscanf(fp, "%7s %llu %llu %llu %llu %llu %llu %llu %llu",
+            cpu_label, &user, &nice, &system, &idle, &iowait, &irq, &softirq, &steal) != 9) {
+         fclose(fp);
+         perror("Erro ao parsear /proc/stat");
+         *cpu_percent = 0.0;
+         return -1;
+        }
     fclose(fp);
 
     total_jiffies = user + nice + system + idle + iowait + irq + softirq + steal;
@@ -90,7 +100,6 @@ int monitor_cpu_usage(pid_t pid, double *cpu_percent) {
     char line[256];
     unsigned long voluntary_ctxt = 0, nonvoluntary_ctxt = 0;
     int threads = 0;
-    unsigned long swap_kb = 0;
 
     while (fgets(line, sizeof(line), fp)) {
         if (sscanf(line, "Threads: %d", &threads) == 1) continue;
