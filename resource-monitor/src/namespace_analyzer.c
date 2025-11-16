@@ -22,6 +22,11 @@
 #include <sys/stat.h>
 #include <errno.h>
 
+#ifndef PROC_PATH_PREFIX
+#define PROC_PATH_PREFIX "/proc"
+#endif
+
+
 static const char *NAMESPACE_TYPES[MAX_NAMESPACE_TYPES] = {
     "mnt", "uts", "ipc", "net", "pid", "cgroup", "user"
 };
@@ -60,12 +65,13 @@ int read_ns_inode(const char *path, char *buffer, size_t buffer_size) {
  * Retorna número de namespaces encontrados (>=0) ou -1 em erro.
  */
 int list_namespaces(int pid, NamespaceList *list) {
+    if (!list) return -1;
+
     char path[256];
-    snprintf(path, sizeof(path), "/proc/%d/ns", pid);
+    snprintf(path, sizeof(path), "%s/%d/ns", PROC_PATH_PREFIX, pid);
 
     DIR *dir = opendir(path);
     if (!dir) {
-        perror("opendir");
         return -1;
     }
 
@@ -86,12 +92,13 @@ int list_namespaces(int pid, NamespaceList *list) {
         target[len] = '\0';
 
         char *inode = strchr(target, '[');
-        if (inode) {
-            inode++;
-            inode[strlen(inode) - 1] = '\0';
-        } else {
-            continue;
-        }
+        if (!inode) continue;
+
+        inode++;
+        char *end = strchr(inode, ']');
+        if (!end) continue;
+
+        *end = '\0';
 
         strncpy(list->entries[list->count].type, entry->d_name, sizeof(list->entries[0].type)-1);
         strncpy(list->entries[list->count].inode, inode, sizeof(list->entries[0].inode)-1);
@@ -101,9 +108,8 @@ int list_namespaces(int pid, NamespaceList *list) {
     }
 
     closedir(dir);
-    return 0;
+    return list->count;
 }
-
 
 /* Percorre /proc e imprime PIDs que estão no namespace (ns_type:[inode]).
  * Retorna 0 em sucesso, -1 em erro.
@@ -124,7 +130,7 @@ int find_processes_in_namespace(const char *ns_type, const char *inode) {
         if (pid <= 0) continue;
 
         char ns_path[128];
-        snprintf(ns_path, sizeof(ns_path), "/proc/%d/ns/%s", pid, ns_type);
+        snprintf(ns_path, sizeof(ns_path), "%s/%d/ns/%s", PROC_PATH_PREFIX, pid, ns_type);
 
         /* stat para verificar existência e permissões */
         struct stat st;
@@ -228,7 +234,7 @@ static int ns_map_add_pid(ns_map_entry_t *e, int pid) {
  * Retorna 0 em sucesso, -1 em erro.
  */
 int generate_namespace_report() {
-    DIR *proc = opendir("/proc");
+    DIR *proc = opendir(PROC_PATH_PREFIX);
     if (!proc) {
         perror("opendir(/proc)");
         return -1;
@@ -275,7 +281,7 @@ int generate_namespace_report() {
                 if (map_len + 1 > map_cap) {
                     size_t newcap = (map_cap == 0) ? 32 : map_cap * 2;
                     ns_map_entry_t *tmp = realloc(map, newcap * sizeof(ns_map_entry_t));
-                    if (!tmp) { closedir(proc); free(map); return -1; }
+                    if (!tmp) { closedir(proc); for (size_t z=0; z<map_len; ++z) free(map[z].pids); free(map); return -1; }
                     map = tmp;
                     map_cap = newcap;
                 }
