@@ -4,7 +4,7 @@ CFLAGS = -Wall -Wextra -O2
 INCLUDE = -Iinclude
 
 # Fontes, objetos e binário final
-SRC = src/main.c src/cpu_monitor.c src/memory_monitor.c src/io_monitor.c
+SRC = src/main.c src/cpu_monitor.c src/memory_monitor.c src/io_monitor.c src/namespace_analyzer.c 
 OBJ = $(SRC:.c=.o)
 TARGET = resource_monitor
 
@@ -22,16 +22,26 @@ $(TARGET): $(OBJ)
 %.o: %.c
 	$(CC) $(CFLAGS) $(INCLUDE) -c $< -o $@
 
-#Testes
+# Testes
 test:
 	@echo "== Rodando testes =="
+
+	# Teste CPU
 	gcc -Iinclude -o tests/test_cpu tests/test_cpu.c src/cpu_monitor.c
+
+	# Teste Memory
 	gcc -Iinclude -o tests/test_memory tests/test_memory.c src/memory_monitor.c
-	gcc -Iinclude -o tests/test_io tests/test_io.c src/io_monitor.c
+
+	# Teste IO (usa funções de memória também)
+	gcc -Iinclude -o tests/test_io tests/test_io.c src/io_monitor.c src/memory_monitor.c
+
+	# Teste Namespace
+	gcc -Iinclude -o tests/test_namespace tests/test_namespace.c src/namespace_analyzer.c
+
 	@./tests/test_cpu
 	@./tests/test_memory
 	@./tests/test_io
-
+	@./tests/test_namespace
 # Limpeza
 clean:
-	rm -f $(OBJ) $(TARGET)
+	rm -f $(OBJ) $(TARGET) tests/test_cpu tests/test_memory tests/test_io tests/test_namespace

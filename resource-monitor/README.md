@@ -61,3 +61,9 @@ sudo apt install libjson-c-dev
 * CSV e JSON são salvos com timestamp, PID, CPU%, RSS/VSZ e bytes de I/O.
 
 ---
+
+Namespace commands
+--ns-list <pid>
+--ns-find <type> <inode>
+--ns-compare <pid1> <pid2>
+--ns-report

@@ -1,64 +1,84 @@
 #include "monitor.h"
+#include "namespace.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <signal.h>
 #include <unistd.h>
 #include <time.h>
 #include <string.h>
-#include <json-c/json.h>   // biblioteca de JSON (instale com `sudo apt install libjson-c-dev`)
-
-// Tratamento de processo inexistente
-#include <signal.h>
+#include <json-c/json.h>
 #include <errno.h>
 
 int check_process_exists(pid_t pid) {
     if (kill(pid, 0) == 0) {
-        return 1; // Processo existe
+        return 1;
     } else {
-        if (errno == ESRCH) {
+        if (errno == ESRCH)
             fprintf(stderr, "Erro: processo %d não existe.\n", pid);
-        } else if (errno == EPERM) {
+        else if (errno == EPERM)
             fprintf(stderr, "Erro: sem permissão para acessar o processo %d.\n", pid);
-        } else {
+        else
             perror("Erro ao verificar processo");
-        }
         return 0;
     }
 }
 
-// Exporta dados em CSV
+/* ===================== EXPORTAÇÃO CSV ====================== */
+
 int export_metrics_csv(const char *filename, const proc_metrics_t *data, size_t count) {
     FILE *f = fopen(filename, "w");
     if (!f) return -1;
 
-    fprintf(f, "PID,CPU%%,RSS(kB),VSZ(kB),Read_Bytes,Write_Bytes\n");
+    fprintf(f,
+        "Timestamp,PID,CPU%%,Threads,VolCtx,InvCtx,"
+        "RSS(kB),VSZ(kB),MinFlt,MajFlt,Swap(kB),"
+        "RChar,WChar,ReadBytes,WriteBytes,Syscalls\n");
+
     for (size_t i = 0; i < count; i++) {
-            fprintf(f, "%d,%.0f,%.2f,%lu,%lu,%llu,%llu\n",
-                data[i].pid,
-                data[i].timestamp,
-                data[i].cpu_percent,
-                data[i].rss_kb,
-                data[i].vmsize_kb,
-                data[i].read_bytes,
-                data[i].write_bytes);
+        fprintf(f,
+            "%.0f,%d,%.2f,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,"
+            "%llu,%llu,%llu,%llu,%llu\n",
+            data[i].timestamp, data[i].pid, data[i].cpu_percent,
+            data[i].threads, data[i].voluntary_ctxt, data[i].involuntary_ctxt,
+            data[i].rss_kb, data[i].vmsize_kb, data[i].minflt,
+            data[i].majflt, data[i].swap_kb,
+            data[i].rchar, data[i].wchar,
+            data[i].read_bytes, data[i].write_bytes, data[i].syscalls);
     }
+
     fclose(f);
     return 0;
 }
 
-// Exporta dados em JSON
+/* ===================== EXPORTAÇÃO JSON ====================== */
+
 int export_metrics_json(const char *filename, const proc_metrics_t *data, size_t count) {
     struct json_object *jarray = json_object_new_array();
 
     for (size_t i = 0; i < count; i++) {
         struct json_object *jobj = json_object_new_object();
+
         json_object_object_add(jobj, "timestamp", json_object_new_double(data[i].timestamp));
         json_object_object_add(jobj, "pid", json_object_new_int(data[i].pid));
-        json_object_object_add(jobj, "cpu_usage", json_object_new_double(data[i].cpu_percent));
-        json_object_object_add(jobj, "rss", json_object_new_int64(data[i].rss_kb));
-        json_object_object_add(jobj, "vsz", json_object_new_int64(data[i].vmsize_kb));
+        json_object_object_add(jobj, "cpu_percent", json_object_new_double(data[i].cpu_percent));
+
+        json_object_object_add(jobj, "threads", json_object_new_int64(data[i].threads));
+        json_object_object_add(jobj, "voluntary_ctxt", json_object_new_int64(data[i].voluntary_ctxt));
+        json_object_object_add(jobj, "involuntary_ctxt", json_object_new_int64(data[i].involuntary_ctxt));
+
+        json_object_object_add(jobj, "rss_kb", json_object_new_int64(data[i].rss_kb));
+        json_object_object_add(jobj, "vmsize_kb", json_object_new_int64(data[i].vmsize_kb));
+
+        json_object_object_add(jobj, "minflt", json_object_new_int64(data[i].minflt));
+        json_object_object_add(jobj, "majflt", json_object_new_int64(data[i].majflt));
+        json_object_object_add(jobj, "swap_kb", json_object_new_int64(data[i].swap_kb));
+
+        json_object_object_add(jobj, "rchar", json_object_new_int64(data[i].rchar));
+        json_object_object_add(jobj, "wchar", json_object_new_int64(data[i].wchar));
         json_object_object_add(jobj, "read_bytes", json_object_new_int64(data[i].read_bytes));
         json_object_object_add(jobj, "write_bytes", json_object_new_int64(data[i].write_bytes));
+        json_object_object_add(jobj, "syscalls", json_object_new_int64(data[i].syscalls));
+
         json_object_array_add(jarray, jobj);
     }
 
@@ -74,50 +94,91 @@ int export_metrics_json(const char *filename, const proc_metrics_t *data, size_t
     return 0;
 }
 
+/* ===================== TESTES ====================== */
+
 void run_tests() {
-    printf("== MODO TESTE: validando módulos ==\n\n");
+    printf("== TESTES DO RESOURCE MONITOR ==\n\n");
 
     pid_t pid = getpid();
-    double cpu = 0.0;
-    unsigned long rss_kb = 0, vmsize_kb = 0;
-    unsigned long long read_b = 0, write_b = 0;
+    proc_metrics_t test = {0};
+    test.pid = pid;
 
-    printf("Testando monitor_cpu_usage()...\n");
-    if (monitor_cpu_usage(pid, &cpu) == 0)
-        printf("✅ CPU (PID %d): %.2f%%\n", pid, cpu);
-    else
-        printf("❌ Falha ao medir CPU do processo %d.\n", pid);
+    printf("→ Testando CPU...\n");
+    if (monitor_cpu_usage(pid, &test.cpu_percent) == 0)
+        printf("   OK  CPU %.2f%%\n", test.cpu_percent);
 
-    sleep(1);
+    printf("→ Testando Memória...\n");
+    if (monitor_memory_usage(pid,
+            &test.rss_kb, &test.vmsize_kb,
+            &test.minflt, &test.majflt, &test.swap_kb) == 0)
+        printf("   OK  RSS=%lu KB | VSZ=%lu KB | minflt=%lu | majflt=%lu | swap=%lu\n",
+               test.rss_kb, test.vmsize_kb, test.minflt, test.majflt, test.swap_kb);
 
-    if (monitor_cpu_usage(pid, &cpu) == 0)
-        printf("✅ CPU (PID %d): %.2f%% (segunda medição)\n\n", pid, cpu);
+    printf("→ Testando I/O e Syscalls...\n");
+    if (monitor_io_usage(pid,
+            &test.rchar, &test.wchar,
+            &test.read_bytes, &test.write_bytes, &test.syscalls) == 0)
+        printf("   OK  rchar=%llu | wchar=%llu | read=%llu | write=%llu | syscalls=%llu\n",
+               test.rchar, test.wchar, test.read_bytes, test.write_bytes, test.syscalls);
 
-    printf("Testando monitor_memory_usage()...\n");
-    if (monitor_memory_usage(pid, &rss_kb, &vmsize_kb) == 0)
-        printf("✅ Memória RSS: %lu KB | VSZ: %lu KB\n\n", rss_kb, vmsize_kb);
-    else
-        printf("❌ Falha ao medir memória do processo %d.\n", pid);
-
-    printf("Testando monitor_io_usage()...\n");
-    if (monitor_io_usage(pid, &read_b, &write_b) == 0)
-        printf("✅ IO Read: %llu bytes | Write: %llu bytes\n\n", read_b, write_b);
-    else
-        printf("❌ Falha ao medir IO do processo %d.\n", pid);
-
-    printf("== TESTES CONCLUÍDOS ==\n");
+    printf("\n== Testes concluídos ==\n");
 }
+
+/* ===================== LOOP PRINCIPAL ====================== */
 
 static volatile int running = 1;
-void handle_sigint(int sig __attribute__((unused))) {
-    running = 0;
-}
+void handle_sigint(int sig __attribute__((unused))) { running = 0; }
 
 int main(int argc, char *argv[]) {
+    
     if (argc == 2 && strcmp(argv[1], "--test") == 0) {
         run_tests();
         return 0;
     }
+
+ /* ===== Namespace Analyzer ===== */
+if (argc >= 2) {
+
+    if ((argc == 3 && (strcmp(argv[1], "--ns-list") == 0 || strcmp(argv[1], "--list-ns") == 0))) {
+        int pid = atoi(argv[2]);
+        if (pid <= 0) {
+            fprintf(stderr, "PID inválido: %s\n", argv[2]);
+            return 1;
+        }
+
+        NamespaceList list;
+        memset(&list, 0, sizeof(list));
+
+        if (list_namespaces(pid, &list) != 0) {
+            fprintf(stderr, "Falha ao ler namespaces do PID %d\n", pid);
+            return 1;
+        }
+
+        printf("Namespaces do PID %d:\n", pid);
+        for (int i = 0; i < list.count; i++) {
+            printf("  %s:[%s]\n", list.entries[i].type, list.entries[i].inode);
+        }
+        return 0;
+    }
+
+    if (argc == 4 && strcmp(argv[1], "--ns-find") == 0) {
+        const char *type = argv[2];
+        const char *inode = argv[3];
+        return find_processes_in_namespace(type, inode);
+    }
+
+    if (argc == 4 && strcmp(argv[1], "--ns-compare") == 0) {
+        int pid1 = atoi(argv[2]);
+        int pid2 = atoi(argv[3]);
+        if (pid1 <= 0 || pid2 <= 0) { fprintf(stderr, "PIDs inválidos\n"); return 1; }
+        return compare_namespaces(pid1, pid2);
+    }
+
+    if (argc == 2 && strcmp(argv[1], "--ns-report") == 0) {
+        return generate_namespace_report();
+    }
+}
+
 
     if (argc < 3) {
         fprintf(stderr, "Uso: %s <PID> <arquivo_saida.csv|.json> [intervalo]\n", argv[0]);
@@ -125,73 +186,56 @@ int main(int argc, char *argv[]) {
     }
 
     pid_t pid = atoi(argv[1]);
-    const char *output_file = argv[2];
+    const char *outfile = argv[2];
     int interval = (argc >= 4) ? atoi(argv[3]) : 1;
 
-    // Verifica se o processo existe antes de começar
-    if (!check_process_exists(pid)) {
+    if (!check_process_exists(pid))
         return EXIT_FAILURE;
-    }
 
     signal(SIGINT, handle_sigint);
 
-    printf("Monitorando PID %d a cada %d s (Ctrl+C para parar)...\n", pid, interval);
+    printf("Monitorando PID %d a cada %d s... (Ctrl+C para sair)\n", pid, interval);
 
-    // Vetor para armazenar amostras (exemplo: até 1000 amostras)
     proc_metrics_t *data = NULL;
     size_t count = 0;
 
-    while (running && count < 1000) {        
-        char proc_path[64];
-        snprintf(proc_path, sizeof(proc_path), "/proc/%d", pid);
-        if (access(output_file, F_OK) != 0) {
-            fprintf(stderr, "\nProcesso %d terminou. Encerrando monitoramento.\n", pid);
-            break;
-        }
-        
-         // Cria nova amostra
+    while (running && count < 1000) {
         data = realloc(data, (count + 1) * sizeof(proc_metrics_t));
         if (!data) {
-            perror("Erro de alocação de memória");
+            perror("Erro de alocação");
             return EXIT_FAILURE;
         }
 
         proc_metrics_t *m = &data[count];
-        memset(m, 0, sizeof(proc_metrics_t));
+        memset(m, 0, sizeof(*m));
 
         m->pid = pid;
         m->timestamp = time(NULL);
 
-        // Coleta métricas com verificação de erro
-        if (monitor_cpu_usage(pid, &m->cpu_percent) != 0)
-            m->cpu_percent = 0.0;
+        /* COLETA COMPLETA */
+        monitor_cpu_usage(pid, &m->cpu_percent);
+        monitor_memory_usage(pid, &m->rss_kb, &m->vmsize_kb, &m->minflt, &m->majflt, &m->swap_kb);
+        monitor_io_usage(pid, &m->rchar, &m->wchar, &m->read_bytes, &m->write_bytes, &m->syscalls);
 
-        if (monitor_memory_usage(pid, &m->rss_kb, &m->vmsize_kb) != 0)
-            m->rss_kb = m->vmsize_kb = 0;
-
-        if (monitor_io_usage(pid, &m->read_bytes, &m->write_bytes) != 0)
-            m->read_bytes = m->write_bytes = 0;
-
-        printf("[%.0f] CPU: %.2f%% | RSS: %lu KB | VSZ: %lu KB | R: %llu | W: %llu\n",
+        printf("[%.0f] CPU: %.2f%% | RSS: %lu KB | VSZ: %lu KB "
+               "| R/W: %llu/%llu | Syscalls: %llu\n",
                m->timestamp, m->cpu_percent, m->rss_kb, m->vmsize_kb,
-               m->read_bytes, m->write_bytes);
-        
+               m->read_bytes, m->write_bytes, m->syscalls);
+
         count++;
         sleep(interval);
-
     }
 
-    printf("Encerrando monitoramento. Exportando dados para %s...\n", output_file);
+    printf("\nEncerrando e exportando para %s...\n", outfile);
 
-    // Exporta os dados coletados no formato certo
-    if (strstr(output_file, ".csv"))
-        export_metrics_csv(output_file, data, 1);
-    else if (strstr(output_file, ".json"))
-        export_metrics_json(output_file, data, 1);
+    if (strstr(outfile, ".csv"))
+        export_metrics_csv(outfile, data, count);
+    else if (strstr(outfile, ".json"))
+        export_metrics_json(outfile, data, count);
     else
-        printf("Formato de saída não reconhecido. Use .csv ou .json\n");
+        fprintf(stderr, "Formato não reconhecido (use .csv ou .json)\n");
 
-    printf("Exportação concluída.\n");
     free(data);
+    printf("Exportação concluída.\n");
     return EXIT_SUCCESS;
 }
